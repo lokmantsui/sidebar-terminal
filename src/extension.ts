@@ -1,16 +1,34 @@
-const vscode = require('vscode');
-const cp = require('child_process');
-const os = require('os');
-const path = require('path');
+import * as vscode from 'vscode';
+import * as cp from 'child_process';
+import * as os from 'os';
+import * as path from 'path';
+import * as fs from 'fs';
+import type { Readable, Writable } from 'stream';
+import * as piContext from './picontext';
 
-const fs = require('fs');
-const piContext = require('./picontext');
+// python3 ptyhost.py: stdin/stdout pipes, stderr inherited, fd 3 = resize channel.
+type PtyProc = cp.ChildProcessByStdio<Writable, Readable, null>;
+
+type OpenPath = { url: string } | { search: string } | { path: string; line?: number; col?: number };
+
+// Messages posted by the webview script below.
+interface WebviewMsg {
+  copy?: string;
+  resolve?: string[];
+  id?: number;
+  openPath?: OpenPath;
+  open?: string;
+  paste?: boolean;
+  input?: string;
+  cols?: number;
+  rows?: number;
+}
 
 // cwds of the shell and everything running under it (deepest first), e.g. pi's cwd — used to resolve relative paths.
-const processCwds = (rootPid) => {
-  const out = [];
-  const walk = (pid) => {
-    let kids = [];
+const processCwds = (rootPid: number | undefined): string[] => {
+  const out: string[] = [];
+  const walk = (pid: number | string): void => {
+    let kids: string[] = [];
     try { kids = fs.readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim().split(/\s+/).filter(Boolean); } catch {}
     kids.forEach(walk);
     try { out.push(fs.readlinkSync(`/proc/${pid}/cwd`)); } catch {}
@@ -19,46 +37,48 @@ const processCwds = (rootPid) => {
   return [...new Set(out)];
 };
 
-exports.deactivate = () => piContext.deactivate();
+export const deactivate = (): void => piContext.deactivate();
 
-exports.activate = (ctx) => {
+export const activate = (ctx: vscode.ExtensionContext): void => {
   piContext.activate(ctx);
   ctx.subscriptions.push(vscode.window.registerWebviewViewProvider('sidebarTerminal.view', {
-    async resolveWebviewView(view) {
+    async resolveWebviewView(view: vscode.WebviewView) {
       // The pi bridge's server listens asynchronously; wait (briefly) for it so the shell
       // inherits PI_VSCODE_PORT from process.env.
       for (let i = 0; i < 20 && !process.env.PI_VSCODE_PORT; i++) await new Promise((r) => setTimeout(r, 100));
 
       const xterm = vscode.Uri.joinPath(ctx.extensionUri, 'node_modules', '@xterm');
-      const uri = (p) => view.webview.asWebviewUri(vscode.Uri.joinPath(xterm, p));
+      const uri = (p: string) => view.webview.asWebviewUri(vscode.Uri.joinPath(xterm, p));
       view.webview.options = { enableScripts: true, localResourceRoots: [xterm] };
 
       const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || os.homedir();
-      const startupCmd = vscode.workspace.getConfiguration('sidebarTerminal').get('startupCommand', '').trim();
-      const send = (s) => view.webview.postMessage(Buffer.from(s).toString('base64'));
-      let proc, size, disposed = false, exited = false;
-      const start = () => {
+      const startupCmd = vscode.workspace.getConfiguration('sidebarTerminal').get<string>('startupCommand', '').trim();
+      const send = (s: string) => view.webview.postMessage(Buffer.from(s).toString('base64'));
+      let proc!: PtyProc;
+      let size: string | undefined, disposed = false, exited = false;
+      const resizeStream = () => proc.stdio[3] as Writable;
+      const start = (): void => {
         exited = false;
         proc = cp.spawn('python3', [path.join(ctx.extensionPath, 'ptyhost.py')], {
           cwd, env: { ...process.env, TERM: 'xterm-256color', TERM_PROGRAM: 'vscode' }, stdio: ['pipe', 'pipe', 'inherit', 'pipe'],
-        });
+        }) as PtyProc;
         const p = proc;
-        p.stdout.on('data', (d) => view.webview.postMessage(d.toString('base64')));
+        p.stdout.on('data', (d: Buffer) => view.webview.postMessage(d.toString('base64')));
         p.on('exit', () => {
           if (disposed || p !== proc) return;
           exited = true;
           send('\r\n\x1b[2m[process exited \u2014 press any key to restart]\x1b[0m\r\n');
         });
         // Resize before the startup command so it starts at the right size; on first start we wait for the webview's size.
-        if (size) { p.stdio[3].write(size); if (startupCmd) p.stdin.write(startupCmd + '\r'); }
+        if (size) { resizeStream().write(size); if (startupCmd) p.stdin.write(startupCmd + '\r'); }
       };
       start();
       view.onDidDispose(() => { disposed = true; proc.kill(); });
-      view.webview.onDidReceiveMessage(async (m) => {
+      view.webview.onDidReceiveMessage(async (m: WebviewMsg) => {
         if (m.copy !== undefined) return vscode.env.clipboard.writeText(m.copy);
         if (m.resolve) {
           const bases = [...processCwds(proc?.pid), cwd];
-          const results = await Promise.all(m.resolve.map(async (p) => {
+          const results = await Promise.all(m.resolve.map(async (p): Promise<string | null> => {
             if (p.startsWith('~/')) p = path.join(os.homedir(), p.slice(2));
             for (const f of path.isAbsolute(p) ? [p] : bases.map((b) => path.resolve(b, p))) {
               try { await fs.promises.stat(f); return f; } catch {}
@@ -67,17 +87,18 @@ exports.activate = (ctx) => {
           }));
           return view.webview.postMessage({ resolved: m.id, results });
         }
-        if (m.openPath?.url) return vscode.env.openExternal(vscode.Uri.parse(m.openPath.url));
-        if (m.openPath?.search) return vscode.commands.executeCommand('workbench.action.quickOpen', m.openPath.search);
-        if (m.openPath) {
-          const u = vscode.Uri.file(m.openPath.path);
-          if ((await fs.promises.stat(m.openPath.path)).isDirectory()) return vscode.commands.executeCommand('revealInExplorer', u);
-          const line = Math.max(0, (m.openPath.line || 1) - 1), col = Math.max(0, (m.openPath.col || 1) - 1);
-          return vscode.window.showTextDocument(u, m.openPath.line ? { selection: new vscode.Range(line, col, line, col) } : {});
+        const op = m.openPath;
+        if (op && 'url' in op) return vscode.env.openExternal(vscode.Uri.parse(op.url));
+        if (op && 'search' in op) return vscode.commands.executeCommand('workbench.action.quickOpen', op.search);
+        if (op) {
+          const u = vscode.Uri.file(op.path);
+          if ((await fs.promises.stat(op.path)).isDirectory()) return vscode.commands.executeCommand('revealInExplorer', u);
+          const line = Math.max(0, (op.line || 1) - 1), col = Math.max(0, (op.col || 1) - 1);
+          return vscode.window.showTextDocument(u, op.line ? { selection: new vscode.Range(line, col, line, col) } : {});
         }
         if (m.open) {
           // file:// links (e.g. paths printed by pi) open in the editor; everything else externally.
-          let u; try { u = vscode.Uri.parse(m.open, true); } catch { return; }
+          let u: vscode.Uri; try { u = vscode.Uri.parse(m.open, true); } catch { return; }
           return u.scheme === 'file' ? vscode.commands.executeCommand('vscode.open', u) : vscode.env.openExternal(u);
         }
         if (m.paste) return view.webview.postMessage({ paste: await vscode.env.clipboard.readText() });
@@ -87,7 +108,7 @@ exports.activate = (ctx) => {
         }
         const first = !size;
         size = `${m.cols} ${m.rows}\n`;
-        if (!exited) proc.stdio[3].write(size);
+        if (!exited) resizeStream().write(size);
         if (first && startupCmd) proc.stdin.write(startupCmd + '\r');
       });
 
@@ -100,7 +121,7 @@ exports.activate = (ctx) => {
 <script src="${uri('xterm/lib/xterm.js')}"></script>
 <script src="${uri('addon-fit/lib/addon-fit.js')}"></script>
 <script src="${uri('addon-web-links/lib/addon-web-links.js')}"></script>
-<script>${fs.readFileSync(path.join(ctx.extensionPath, 'pathlinks.js'), 'utf8')}</script>
+<script>${fs.readFileSync(path.join(ctx.extensionPath, 'out', 'webview', 'pathlinks.js'), 'utf8')}</script>
 <script>
   const vscode = acquireVsCodeApi();
   const css = (v) => getComputedStyle(document.body).getPropertyValue(v).trim();

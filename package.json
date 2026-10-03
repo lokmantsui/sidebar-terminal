@@ -2,17 +2,72 @@
   "name": "sidebar-terminal",
   "publisher": "local",
   "version": "0.0.1",
-  "engines": { "vscode": "^1.80.0" },
-  "main": "extension.js",
-  "activationEvents": ["onStartupFinished"],
-  "contributes": {
-    "commands": [{ "command": "piContext.sendToPi", "title": "Pi: Send Selection to Pi" }],
-    "keybindings": [{ "command": "piContext.sendToPi", "key": "ctrl+alt+k", "mac": "cmd+alt+k", "when": "editorTextFocus" }],
-    "configuration": { "title": "Sidebar Terminal", "properties": {
-      "sidebarTerminal.startupCommand": { "type": "string", "default": "", "description": "Command typed into the shell when the sidebar terminal starts (e.g. pi). Leave empty for none." }
-    } },
-    "viewsContainers": { "activitybar": [{ "id": "sidebarTerminal", "title": "Sidebar Terminal", "icon": "icon.svg" }] },
-    "views": { "sidebarTerminal": [{ "id": "sidebarTerminal.view", "name": "Sidebar Terminal", "type": "webview" }] }
+  "engines": {
+    "vscode": "^1.80.0"
   },
-  "dependencies": { "@xterm/xterm": "^5.5.0", "@xterm/addon-fit": "^0.10.0", "@xterm/addon-web-links": "^0.11.0" }
+  "main": "out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "test": "tsc -p . && node out/test/picontext.test.js",
+    "check": "tsc -p . && node out/test/check.js",
+    "vscode:prepublish": "npm run compile"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "piContext.sendToPi",
+        "title": "Pi: Send Selection to Pi"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "piContext.sendToPi",
+        "key": "ctrl+alt+k",
+        "mac": "cmd+alt+k",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "Sidebar Terminal",
+      "properties": {
+        "sidebarTerminal.startupCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Command typed into the shell when the sidebar terminal starts (e.g. pi). Leave empty for none."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "sidebarTerminal",
+          "title": "Sidebar Terminal",
+          "icon": "icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "sidebarTerminal": [
+        {
+          "id": "sidebarTerminal.view",
+          "name": "Sidebar Terminal",
+          "type": "webview"
+        }
+      ]
+    }
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/xterm": "^5.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/vscode": "~1.80.0",
+    "typescript": "^7.0.2"
+  }
 }
