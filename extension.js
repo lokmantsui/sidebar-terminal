@@ -4,6 +4,7 @@ const os = require('os');
 const path = require('path');
 
 const fs = require('fs');
+const piContext = require('./picontext');
 
 // cwds of the shell and everything running under it (deepest first), e.g. pi's cwd — used to resolve relative paths.
 const processCwds = (rootPid) => {
@@ -18,12 +19,14 @@ const processCwds = (rootPid) => {
   return [...new Set(out)];
 };
 
+exports.deactivate = () => piContext.deactivate();
+
 exports.activate = (ctx) => {
+  piContext.activate(ctx);
   ctx.subscriptions.push(vscode.window.registerWebviewViewProvider('sidebarTerminal.view', {
     async resolveWebviewView(view) {
-      // On window reload this view can be restored before the pi bridge activates; wait
-      // (briefly) for it so the shell inherits PI_VSCODE_PORT from process.env.
-      try { await vscode.extensions.getExtension('local.pi-vscode-context')?.activate(); } catch {}
+      // The pi bridge's server listens asynchronously; wait (briefly) for it so the shell
+      // inherits PI_VSCODE_PORT from process.env.
       for (let i = 0; i < 20 && !process.env.PI_VSCODE_PORT; i++) await new Promise((r) => setTimeout(r, 100));
 
       const xterm = vscode.Uri.joinPath(ctx.extensionUri, 'node_modules', '@xterm');

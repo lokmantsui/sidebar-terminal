@@ -4,8 +4,10 @@
   "version": "0.0.1",
   "engines": { "vscode": "^1.80.0" },
   "main": "extension.js",
-  "activationEvents": [],
+  "activationEvents": ["onStartupFinished"],
   "contributes": {
+    "commands": [{ "command": "piContext.sendToPi", "title": "Pi: Send Selection to Pi" }],
+    "keybindings": [{ "command": "piContext.sendToPi", "key": "ctrl+alt+k", "mac": "cmd+alt+k", "when": "editorTextFocus" }],
     "configuration": { "title": "Sidebar Terminal", "properties": {
       "sidebarTerminal.startupCommand": { "type": "string", "default": "", "description": "Command typed into the shell when the sidebar terminal starts (e.g. pi). Leave empty for none." }
     } },
