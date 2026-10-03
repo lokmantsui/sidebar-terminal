@@ -36,7 +36,9 @@ exports.activate = (ctx) => {
       };
       start();
       view.onDidDispose(() => { disposed = true; proc.kill(); });
-      view.webview.onDidReceiveMessage((m) => {
+      view.webview.onDidReceiveMessage(async (m) => {
+        if (m.copy !== undefined) return vscode.env.clipboard.writeText(m.copy);
+        if (m.paste) return view.webview.postMessage({ paste: await vscode.env.clipboard.readText() });
         if (m.input !== undefined) {
           if (exited) { send('\x1bc'); return start(); } // reset screen, respawn shell
           return proc.stdin.write(m.input);
@@ -67,9 +69,23 @@ exports.activate = (ctx) => {
   term.loadAddon(fit);
   term.open(document.getElementById('t'));
   term.onData((input) => vscode.postMessage({ input }));
+  // xterm would turn Ctrl+Shift+C/V into ^C/^V; copy/paste via the extension host's clipboard instead.
+  term.attachCustomKeyEventHandler((e) => {
+    if (!(e.ctrlKey && e.shiftKey && (e.code === 'KeyC' || e.code === 'KeyV'))) return true;
+    if (e.type === 'keydown') {
+      e.preventDefault();
+      e.stopPropagation(); // don't let VS Code see it (Ctrl+Shift+C = open external terminal)
+      if (e.code === 'KeyV') vscode.postMessage({ paste: true });
+      else if (term.hasSelection()) vscode.postMessage({ copy: term.getSelection() });
+    }
+    return false;
+  });
   term.onResize(({ cols, rows }) => vscode.postMessage({ cols, rows }));
   new ResizeObserver(() => fit.fit()).observe(document.body);
-  window.addEventListener('message', (e) => term.write(Uint8Array.from(atob(e.data), (c) => c.charCodeAt(0))));
+  window.addEventListener('message', (e) => {
+    if (e.data.paste !== undefined) return term.paste(e.data.paste); // handles bracketed paste mode
+    term.write(Uint8Array.from(atob(e.data), (c) => c.charCodeAt(0)));
+  });
   fit.fit();
   vscode.postMessage({ cols: term.cols, rows: term.rows });
 </script></body></html>`;
