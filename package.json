@@ -1,0 +1,16 @@
+{
+  "name": "sidebar-terminal",
+  "publisher": "local",
+  "version": "0.0.1",
+  "engines": { "vscode": "^1.80.0" },
+  "main": "extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "configuration": { "title": "Sidebar Terminal", "properties": {
+      "sidebarTerminal.startupCommand": { "type": "string", "default": "", "description": "Command typed into the shell when the sidebar terminal starts (e.g. pi). Leave empty for none." }
+    } },
+    "viewsContainers": { "activitybar": [{ "id": "sidebarTerminal", "title": "Sidebar Terminal", "icon": "icon.svg" }] },
+    "views": { "sidebarTerminal": [{ "id": "sidebarTerminal.view", "name": "Sidebar Terminal", "type": "webview" }] }
+  },
+  "dependencies": { "@xterm/xterm": "^5.5.0", "@xterm/addon-fit": "^0.10.0" }
+}
