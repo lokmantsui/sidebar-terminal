@@ -16,17 +16,35 @@ exports.activate = (ctx) => {
       view.webview.options = { enableScripts: true, localResourceRoots: [xterm] };
 
       const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || os.homedir();
-      const proc = cp.spawn('python3', [path.join(ctx.extensionPath, 'ptyhost.py')], {
-        cwd, env: { ...process.env, TERM: 'xterm-256color', TERM_PROGRAM: 'vscode' }, stdio: ['pipe', 'pipe', 'inherit', 'pipe'],
-      });
-      proc.stdout.on('data', (d) => view.webview.postMessage(d.toString('base64')));
-      proc.on('exit', () => view.webview.postMessage(Buffer.from('\r\n[process exited]\r\n').toString('base64')));
-      view.onDidDispose(() => proc.kill());
-      let startup = vscode.workspace.getConfiguration('sidebarTerminal').get('startupCommand', '').trim();
+      const startupCmd = vscode.workspace.getConfiguration('sidebarTerminal').get('startupCommand', '').trim();
+      const send = (s) => view.webview.postMessage(Buffer.from(s).toString('base64'));
+      let proc, size, disposed = false, exited = false;
+      const start = () => {
+        exited = false;
+        proc = cp.spawn('python3', [path.join(ctx.extensionPath, 'ptyhost.py')], {
+          cwd, env: { ...process.env, TERM: 'xterm-256color', TERM_PROGRAM: 'vscode' }, stdio: ['pipe', 'pipe', 'inherit', 'pipe'],
+        });
+        const p = proc;
+        p.stdout.on('data', (d) => view.webview.postMessage(d.toString('base64')));
+        p.on('exit', () => {
+          if (disposed || p !== proc) return;
+          exited = true;
+          send('\r\n\x1b[2m[process exited \u2014 press any key to restart]\x1b[0m\r\n');
+        });
+        // Resize before the startup command so it starts at the right size; on first start we wait for the webview's size.
+        if (size) { p.stdio[3].write(size); if (startupCmd) p.stdin.write(startupCmd + '\r'); }
+      };
+      start();
+      view.onDidDispose(() => { disposed = true; proc.kill(); });
       view.webview.onDidReceiveMessage((m) => {
-        if (m.input !== undefined) return proc.stdin.write(m.input);
-        proc.stdio[3].write(`${m.cols} ${m.rows}\n`);
-        if (startup) { proc.stdin.write(startup + '\r'); startup = ''; } // after first resize so it starts at the right size
+        if (m.input !== undefined) {
+          if (exited) { send('\x1bc'); return start(); } // reset screen, respawn shell
+          return proc.stdin.write(m.input);
+        }
+        const first = !size;
+        size = `${m.cols} ${m.rows}\n`;
+        if (!exited) proc.stdio[3].write(size);
+        if (first && startupCmd) proc.stdin.write(startupCmd + '\r');
       });
 
       const csp = view.webview.cspSource;
