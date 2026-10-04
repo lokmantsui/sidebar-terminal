@@ -54,6 +54,7 @@ export const registerSvgViewer = () =>
     const a = e.target.closest?.('a');
     if (!a) return;
     e.preventDefault();
+    e.stopPropagation(); // VS Code's own webview click handler would open the link a second time
     if (!moved) vscode.postMessage(a.getAttribute('href') || a.getAttribute('xlink:href'));
   }, true);
 </script></body></html>`;
