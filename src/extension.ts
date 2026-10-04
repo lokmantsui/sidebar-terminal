@@ -74,6 +74,8 @@ export const activate = (ctx: vscode.ExtensionContext): void => {
       };
       start();
       view.onDidDispose(() => { disposed = true; proc.kill(); });
+      // Opening the sidebar should put the cursor in the terminal (the webview then forwards focus to xterm).
+      view.onDidChangeVisibility(() => { if (view.visible) view.show(false); });
       view.webview.onDidReceiveMessage(async (m: WebviewMsg) => {
         if (m.copy !== undefined) return vscode.env.clipboard.writeText(m.copy);
         if (m.resolve) {
@@ -162,6 +164,9 @@ export const activate = (ctx: vscode.ExtensionContext): void => {
     if (e.data.paste !== undefined) return term.paste(e.data.paste); // handles bracketed paste mode
     term.write(Uint8Array.from(atob(e.data), (c) => c.charCodeAt(0)));
   });
+  // VS Code focuses the webview's window, not xterm's textarea; forward it so typing goes to the terminal.
+  window.addEventListener('focus', () => term.focus());
+  if (document.hasFocus()) term.focus(); // focus may have arrived before this script ran
   fit.fit();
   vscode.postMessage({ cols: term.cols, rows: term.rows });
 </script></body></html>`;
