@@ -58,7 +58,19 @@
           "type": "webview"
         }
       ]
-    }
+    },
+    "customEditors": [
+      {
+        "viewType": "sidebarTerminal.svgViewer",
+        "displayName": "SVG Viewer (zoom/pan/links)",
+        "selector": [
+          {
+            "filenamePattern": "*.svg"
+          }
+        ],
+        "priority": "default"
+      }
+    ]
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import type { Readable, Writable } from 'stream';
 import * as piContext from './picontext';
+import { registerSvgViewer } from './svgviewer';
 
 // python3 ptyhost.py: stdin/stdout pipes, stderr inherited, fd 3 = resize channel.
 type PtyProc = cp.ChildProcessByStdio<Writable, Readable, null>;
@@ -41,6 +42,7 @@ export const deactivate = (): void => piContext.deactivate();
 
 export const activate = (ctx: vscode.ExtensionContext): void => {
   piContext.activate(ctx);
+  ctx.subscriptions.push(registerSvgViewer());
   ctx.subscriptions.push(vscode.window.registerWebviewViewProvider('sidebarTerminal.view', {
     async resolveWebviewView(view: vscode.WebviewView) {
       // The pi bridge's server listens asynchronously; wait (briefly) for it so the shell
