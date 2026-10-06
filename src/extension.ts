@@ -37,6 +37,28 @@ const processCwds = (rootPid: number | undefined): string[] => {
   return [...new Set(out)];
 };
 
+// The Claude Code extension only injects these into integrated terminals (environmentVariableCollection),
+// so find its lock file for this window's workspace and pass them on ourselves.
+const claudeIdeEnv = (): Record<string, string> => {
+  const dir = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'ide');
+  const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+  let best: { port: string; mtime: number } | undefined;
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.lock')) continue;
+      try {
+        const file = path.join(dir, f);
+        const lock = JSON.parse(fs.readFileSync(file, 'utf8')) as { pid?: number; workspaceFolders?: string[] };
+        if (!lock.workspaceFolders?.some((w) => folders.includes(w))) continue;
+        if (lock.pid) process.kill(lock.pid, 0); // throws if stale
+        const mtime = fs.statSync(file).mtimeMs;
+        if (!best || mtime > best.mtime) best = { port: path.basename(f, '.lock'), mtime };
+      } catch {}
+    }
+  } catch {}
+  return best ? { CLAUDE_CODE_SSE_PORT: best.port, ENABLE_IDE_INTEGRATION: 'true' } : {};
+};
+
 export const deactivate = (): void => piContext.deactivate();
 
 export const activate = (ctx: vscode.ExtensionContext): void => {
@@ -46,6 +68,12 @@ export const activate = (ctx: vscode.ExtensionContext): void => {
       // The pi bridge's server listens asynchronously; wait (briefly) for it so the shell
       // inherits PI_VSCODE_PORT from process.env.
       for (let i = 0; i < 20 && !process.env.PI_VSCODE_PORT; i++) await new Promise((r) => setTimeout(r, 100));
+      // Same for Claude Code: on window load its lock file appears a few seconds after we start.
+      const claudeExt = vscode.extensions.getExtension('anthropic.claude-code');
+      if (claudeExt) {
+        await Promise.resolve(claudeExt.activate()).catch(() => {});
+        for (let i = 0; i < 100 && !claudeIdeEnv().CLAUDE_CODE_SSE_PORT; i++) await new Promise((r) => setTimeout(r, 100));
+      }
 
       const xterm = vscode.Uri.joinPath(ctx.extensionUri, 'node_modules', '@xterm');
       const uri = (p: string) => view.webview.asWebviewUri(vscode.Uri.joinPath(xterm, p));
@@ -60,7 +88,7 @@ export const activate = (ctx: vscode.ExtensionContext): void => {
       const start = (): void => {
         exited = false;
         proc = cp.spawn('python3', [path.join(ctx.extensionPath, 'ptyhost.py')], {
-          cwd, env: { ...process.env, TERM: 'xterm-256color', TERM_PROGRAM: 'vscode' }, stdio: ['pipe', 'pipe', 'inherit', 'pipe'],
+          cwd, env: { ...process.env, ...claudeIdeEnv(), TERM: 'xterm-256color', TERM_PROGRAM: 'vscode' }, stdio: ['pipe', 'pipe', 'inherit', 'pipe'],
         }) as PtyProc;
         const p = proc;
         p.stdout.on('data', (d: Buffer) => view.webview.postMessage(d.toString('base64')));
@@ -146,9 +174,17 @@ export const activate = (ctx: vscode.ExtensionContext): void => {
     (openPath) => vscode.postMessage({ openPath })); } catch (e) { console.error('path links disabled', e); }
   term.open(document.getElementById('t'));
   term.onData((input) => vscode.postMessage({ input }));
-  // xterm would turn Ctrl+Shift+C/V into ^C/^V; copy/paste via the extension host's clipboard instead.
+  // OSC 52 clipboard writes (pi copies its own mouse selections this way); reads ("?") are ignored.
+  term.parser.registerOscHandler(52, (data) => {
+    const b64 = data.slice(data.indexOf(';') + 1);
+    if (b64 !== '?') {
+      try { vscode.postMessage({ copy: new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))) }); } catch {}
+    }
+    return true;
+  });
+  // Handle Cmd+C/V and Ctrl+Shift+C/V through VS Code's clipboard, including remote sessions.
   term.attachCustomKeyEventHandler((e) => {
-    if (!(e.ctrlKey && e.shiftKey && (e.code === 'KeyC' || e.code === 'KeyV'))) return true;
+    if (!((e.metaKey || (e.ctrlKey && e.shiftKey)) && !e.altKey && (e.code === 'KeyC' || e.code === 'KeyV'))) return true;
     if (e.type === 'keydown') {
       e.preventDefault();
       e.stopPropagation(); // don't let VS Code see it (Ctrl+Shift+C = open external terminal)
