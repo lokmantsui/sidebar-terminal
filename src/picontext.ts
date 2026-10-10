@@ -100,15 +100,18 @@ function snapshot(editor: vscode.TextEditor): Snapshot {
   };
 }
 
+// User settings use vscode-userdata: even though fsPath points to a local file.
+const isLocalFile = (uri: vscode.Uri): boolean => uri.scheme === "file" || uri.scheme === "vscode-userdata";
+
 function collect(): EditorContext {
   const e = vscode.window.activeTextEditor;
-  if (e && e.document.uri.scheme === "file") last = snapshot(e);
+  if (e && isLocalFile(e.document.uri)) last = snapshot(e);
 
   const openFiles: OpenFile[] = [];
   const seen = new Set<string>();
   for (const tab of vscode.window.tabGroups.all.flatMap((g) => g.tabs)) {
     const uri = (tab.input as { uri?: vscode.Uri } | undefined)?.uri;
-    if (!uri || uri.scheme !== "file" || seen.has(uri.fsPath)) continue;
+    if (!uri || !isLocalFile(uri) || seen.has(uri.fsPath)) continue;
     seen.add(uri.fsPath);
     openFiles.push({
       path: rel(uri.fsPath),

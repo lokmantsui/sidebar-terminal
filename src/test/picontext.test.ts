@@ -45,4 +45,29 @@ tabs.shift(); // close a.py
 connect();
 assert.strictEqual(ctx.selection, null);
 assert.strictEqual(ctx.activeFile, null);
+// User settings are local files with a different URI scheme, outside the workspace.
+const settingsUri = { scheme: "vscode-userdata", fsPath: "/home/user/.config/Code/User/settings.json" };
+const cursor = { ...sel, isEmpty: true, active: { line: 10 } };
+vscode.window.activeTextEditor = {
+  ...editor,
+  document: { ...editor.document, uri: settingsUri, languageId: "jsonc" },
+  selection: cursor,
+  selections: [cursor],
+};
+tabs.push({ input: { uri: settingsUri }, isDirty: false });
+connect();
+assert.strictEqual(ctx.activeFile, settingsUri.fsPath);
+assert.strictEqual(ctx.selection!.cursorLine, 11);
+assert.deepStrictEqual(ctx.selection!.selections, []);
+assert.strictEqual(ctx.openFiles.find((f) => f.path === settingsUri.fsPath)!.active, true);
+
+vscode.window.activeTextEditor = undefined; // focus sidebar terminal / tmux
+connect();
+assert.strictEqual(ctx.activeFile, settingsUri.fsPath);
+assert.strictEqual(ctx.selection!.cursorLine, 11);
+
+tabs.pop(); // close settings
+connect();
+assert.strictEqual(ctx.activeFile, null);
+assert.strictEqual(ctx.selection, null);
 console.log("ok");
