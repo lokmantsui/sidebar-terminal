@@ -106,18 +106,28 @@ export const activate = (ctx: vscode.ExtensionContext): void => {
       view.onDidChangeVisibility(() => { if (view.visible) view.show(false); });
       view.webview.onDidReceiveMessage(async (m: WebviewMsg) => {
         if (m.copy !== undefined) return vscode.env.clipboard.writeText(m.copy);
+        const bases = () => [...processCwds(proc?.pid), cwd, ...(vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath)];
+        const resolvePath = async (p: string, dirs: string[]): Promise<string | null> => {
+          if (p.startsWith('~/')) p = path.join(os.homedir(), p.slice(2));
+          for (const f of path.isAbsolute(p) ? [p] : dirs.map((b) => path.resolve(b, p))) {
+            try { await fs.promises.stat(f); return f; } catch {}
+          }
+          return null;
+        };
         if (m.resolve) {
-          const bases = [...processCwds(proc?.pid), cwd];
-          const results = await Promise.all(m.resolve.map(async (p): Promise<string | null> => {
-            if (p.startsWith('~/')) p = path.join(os.homedir(), p.slice(2));
-            for (const f of path.isAbsolute(p) ? [p] : bases.map((b) => path.resolve(b, p))) {
-              try { await fs.promises.stat(f); return f; } catch {}
-            }
-            return null;
-          }));
+          const dirs = bases();
+          const results = await Promise.all(m.resolve.map((p) => resolvePath(p, dirs)));
           return view.webview.postMessage({ resolved: m.id, results });
         }
-        const op = m.openPath;
+        let op = m.openPath;
+        // OSC 8 links without a scheme (e.g. Claude Code's markdown links "(src/a.ts#L10-L20)") are relative paths.
+        if (m.open && !/^[a-z][\w+.-]*:/i.test(m.open)) {
+          const [, p, l1, c1, l2, c2] = (() => { try { return decodeURI(m.open!); } catch { return m.open!; } })().replace(/^\(|\)$/g, '')
+            .match(/^(.*?)(?:#L(\d+)(?:C(\d+))?(?:-L?\d+(?:C\d+)?)?|:(\d+)(?::(\d+))?)?$/)!;
+          const r = await resolvePath(p, bases());
+          const line = l1 ?? l2, col = c1 ?? c2;
+          op = r ? { path: r, line: line ? +line : undefined, col: col ? +col : undefined } : { search: p };
+        }
         if (op && 'url' in op) return vscode.env.openExternal(vscode.Uri.parse(op.url));
         if (op && 'search' in op) return vscode.commands.executeCommand('workbench.action.quickOpen', op.search);
         if (op) {
