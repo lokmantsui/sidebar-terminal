@@ -183,7 +183,15 @@ export const activate = (ctx: vscode.ExtensionContext): void => {
     (paths) => new Promise((res) => { pending.set(++reqId, res); vscode.postMessage({ resolve: paths, id: reqId }); }),
     (openPath) => vscode.postMessage({ openPath })); } catch (e) { console.error('path links disabled', e); }
   term.open(document.getElementById('t'));
-  term.onData((input) => vscode.postMessage({ input }));
+  // Reserve Ctrl/Cmd-left-click for webview links, not the application's own URL opener.
+  let linkClick = false;
+  term.element.addEventListener('mousedown', (e) => { linkClick = e.button === 0 && (e.ctrlKey || e.metaKey); }, true);
+  document.addEventListener('mouseup', () => { queueMicrotask(() => { linkClick = false; }); }, true);
+  term.onData((input) => {
+    // xterm's mouse packets: SGR, urxvt and X10. Keyboard input must still pass through.
+    if (linkClick && /^\\x1b\\[(?:<\\d+;\\d+;\\d+[Mm]|\\d+;\\d+;\\d+M|M[\\s\\S]{3})$/.test(input)) return;
+    vscode.postMessage({ input });
+  });
   // OSC 52 clipboard writes (pi copies its own mouse selections this way); reads ("?") are ignored.
   term.parser.registerOscHandler(52, (data) => {
     const b64 = data.slice(data.indexOf(';') + 1);

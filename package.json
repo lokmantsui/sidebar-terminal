@@ -12,7 +12,7 @@
   "scripts": {
     "compile": "tsc -p .",
     "watch": "tsc -watch -p .",
-    "test": "tsc -p . && node out/test/picontext.test.js",
+    "test": "tsc -p . && node out/test/picontext.test.js && node out/test/linkclick.test.js",
     "check": "tsc -p . && node out/test/check.js",
     "vscode:prepublish": "npm run compile"
   },
