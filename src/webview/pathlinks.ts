@@ -112,16 +112,24 @@ window.installPathLinks = (term, resolve, open) => {
     provideLinks(y, callback) {
       const soft = joinRows(y, false), hard = joinRows(y, true);
       if (!soft || !hard) return callback(undefined);
-      const onRow = (j: Joined, c: Candidate) => j.pos[c.start].y <= y && j.pos[c.end - 1].y >= y;
+      const onRow = (j: Joined, c: { start: number; end: number }) => j.pos[c.start].y <= y && j.pos[c.end - 1].y >= y;
       const safe = candidates(soft.text).filter((c) => onRow(soft, c));
       // Candidates that cross a hard newline are guesses: only linked if they resolve to a file.
       const guesses = hard.seams.length
         ? candidates(hard.text).filter((c) => onRow(hard, c) && hard.seams.some((s) => c.start < s && s < c.end))
         : [];
-      if (!safe.length && !guesses.length) return callback(undefined);
+      // URLs a TUI hard-wrapped (the web-links addon only follows soft wraps). Only joined where the row
+      // before the break reaches the right edge, so a URL ending a line doesn't swallow the next line's text.
+      // ponytail: right-edge heuristic, misses TUIs that wrap well short of the terminal width.
+      const urls = hard.seams.length
+        ? [...hard.text.matchAll(/https?:\/\/[^\s"'`<>]+/g)]
+          .map((m) => ({ start: m.index!, end: m.index! + m[0].replace(/[.,;:!?'")\]]+$/, '').length }))
+          .filter((c) => onRow(hard, c) && hard.seams.some((s) => c.start < s && s < c.end && hard.pos[s - 1].x >= term.cols - 3))
+        : [];
+      if (!safe.length && !guesses.length && !urls.length) return callback(undefined);
       Promise.all([lookup(safe), lookup(guesses)]).then(([safeRes, guessRes]) => {
         const links: XLink[] = [];
-        const add = (j: Joined, c: Candidate, target: PathLinkTarget) => {
+        const add = (j: Joined, c: { start: number; end: number }, target: PathLinkTarget) => {
           const s = j.pos[c.start], e = j.pos[c.end - 1];
           links.push({
             range: { start: { x: s.x + 1, y: s.y }, end: { x: e.x + 1, y: e.y } },
@@ -130,6 +138,10 @@ window.installPathLinks = (term, resolve, open) => {
           });
         };
         const taken: { s: { x: number; y: number }; e: { x: number; y: number } }[] = [];
+        urls.forEach((c) => {
+          add(hard, c, { url: hard.text.slice(c.start, c.end) });
+          taken.push({ s: hard.pos[c.start], e: hard.pos[c.end - 1] });
+        });
         const before = (a: { x: number; y: number }, b: { x: number; y: number }) => a.y < b.y || (a.y === b.y && a.x < b.x);
         guesses.forEach((c, i) => {
           const r = guessRes[i];

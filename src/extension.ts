@@ -175,13 +175,14 @@ export const activate = (ctx: vscode.ExtensionContext): void => {
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
-  term.loadAddon(new WebLinksAddon.WebLinksAddon(openLink)); // plain-text URLs
   // File paths in plain text (verified to exist by the extension host).
   let reqId = 0;
   const pending = new Map();
   try { installPathLinks(term,
     (paths) => new Promise((res) => { pending.set(++reqId, res); vscode.postMessage({ resolve: paths, id: reqId }); }),
     (openPath) => vscode.postMessage({ openPath })); } catch (e) { console.error('path links disabled', e); }
+  // After path links: earlier providers win, so multi-row URLs beat the addon's partial first-row match.
+  term.loadAddon(new WebLinksAddon.WebLinksAddon(openLink)); // plain-text URLs
   term.open(document.getElementById('t'));
   // Reserve Ctrl/Cmd-left-click for webview links, not the application's own URL opener.
   let linkClick = false;
