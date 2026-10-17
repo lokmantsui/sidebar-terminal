@@ -11,6 +11,8 @@ import * as net from "net";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
+import { Effect, FiberHandle, FiberSet } from "effect";
+import { disposable, thenable } from "./scoped";
 
 interface SelectionInfo {
   startLine: number;
@@ -55,25 +57,22 @@ interface OpenMsg {
 // Fallback for terminals that ignore environmentVariableCollection
 // (e.g. Secondary Terminal): advertise the port in a file pi can discover.
 const PORT_DIR = path.join(os.homedir(), ".pi", "agent", "vscode-ports");
-let portFile: string | undefined;
-function writePortFile(p: number): void {
-  try {
-    fs.mkdirSync(PORT_DIR, { recursive: true });
-    if (portFile && portFile !== path.join(PORT_DIR, `${p}.json`)) fs.rmSync(portFile, { force: true });
-    portFile = path.join(PORT_DIR, `${p}.json`);
-    const folders = (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath);
-    fs.writeFileSync(portFile, JSON.stringify({ port: p, folders, ts: Date.now() }));
-  } catch (e) {
-    console.error("piContext portfile", e);
-  }
-}
+const portFile = (p: number) =>
+  Effect.acquireRelease(
+    Effect.try(() => {
+      const file = path.join(PORT_DIR, `${p}.json`);
+      fs.mkdirSync(PORT_DIR, { recursive: true });
+      const folders = (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath);
+      fs.writeFileSync(file, JSON.stringify({ port: p, folders, ts: Date.now() }));
+      return file;
+    }),
+    (file) => Effect.sync(() => fs.rmSync(file, { force: true })),
+  );
 
 const PORT_KEY = "piContext.port";
 const MAX_LINES = 400;
 const sockets = new Set<net.Socket>();
-let server: net.Server | undefined;
 let last: Snapshot | null = null;
-let timer: NodeJS.Timeout | undefined;
 
 const root = (): string | undefined => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 const rel = (p: string): string => {
@@ -141,19 +140,15 @@ const send = (s: net.Socket, msg: OutMsg): void => {
   if (s.writable) s.write(JSON.stringify(msg) + "\n");
 };
 const broadcast = (msg: OutMsg): void => sockets.forEach((s) => send(s, msg));
-const push = (): void => broadcast({ type: "context", data: collect() });
-const schedule = (): void => {
-  clearTimeout(timer);
-  timer = setTimeout(push, 200);
-};
+const push = Effect.sync(() => broadcast({ type: "context", data: collect() }));
 
-async function open(msg: OpenMsg): Promise<void> {
-  try {
+const open = (msg: OpenMsg) =>
+  Effect.gen(function* () {
     const abs = path.isAbsolute(msg.path) ? msg.path : path.join(root() ?? process.cwd(), msg.path);
-    const doc = await vscode.workspace.openTextDocument(abs);
+    const doc = yield* thenable(() => vscode.workspace.openTextDocument(abs));
     // Don't steal the pi terminal's tab: open beside it if the active tab isn't a text editor.
     const viewColumn = vscode.window.activeTextEditor ? vscode.ViewColumn.Active : vscode.ViewColumn.Beside;
-    const editor = await vscode.window.showTextDocument(doc, { viewColumn, preserveFocus: true });
+    const editor = yield* thenable(() => vscode.window.showTextDocument(doc, { viewColumn, preserveFocus: true }));
     if (msg.line) {
       const start = Math.min(Math.max(0, msg.line - 1), doc.lineCount - 1);
       const end = Math.min(Math.max(start, (msg.endLine ?? msg.line) - 1), doc.lineCount - 1);
@@ -161,10 +156,7 @@ async function open(msg: OpenMsg): Promise<void> {
       editor.selection = new vscode.Selection(range.start, range.end);
       editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
     }
-  } catch (err) {
-    console.error("piContext: open failed", err);
-  }
-}
+  }).pipe(Effect.catchCause((cause) => Effect.logError("piContext: open failed", cause)));
 
 function sendToPi(): void {
   const ctx = collect();
@@ -183,61 +175,63 @@ function sendToPi(): void {
   broadcast({ type: "inject", text });
 }
 
-function listen(context: vscode.ExtensionContext, port: number | undefined): void {
-  const srv = net.createServer((sock) => {
-    sockets.add(sock);
-    sock.setEncoding("utf8");
-    let buf = "";
-    sock.on("data", (chunk: string) => {
-      buf += chunk;
-      let i;
-      while ((i = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, i);
-        buf = buf.slice(i + 1);
-        try {
-          const msg = JSON.parse(line);
-          if (msg.type === "open") open(msg as OpenMsg);
-        } catch {}
-      }
-    });
-    sock.on("close", () => sockets.delete(sock));
-    sock.on("error", () => sockets.delete(sock));
-    send(sock, { type: "context", data: collect() });
+// Resolves with the bound port once listening; the server closes with the Scope.
+const serve = (port: number, onConnection: (sock: net.Socket) => void) =>
+  Effect.acquireRelease(
+    Effect.callback<net.Server, NodeJS.ErrnoException>((resume) => {
+      const srv = net.createServer(onConnection);
+      srv.on("error", (err) => resume(Effect.fail(err)));
+      srv.listen(port, "127.0.0.1", () => resume(Effect.succeed(srv)));
+    }),
+    (srv) => Effect.sync(() => srv.close()),
+  ).pipe(Effect.map((srv) => (srv.address() as net.AddressInfo).port));
+
+const onConnection = (run: (e: Effect.Effect<void>) => unknown) => (sock: net.Socket): void => {
+  sockets.add(sock);
+  sock.setEncoding("utf8");
+  let buf = "";
+  sock.on("data", (chunk: string) => {
+    buf += chunk;
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i);
+      buf = buf.slice(i + 1);
+      try {
+        const msg = JSON.parse(line);
+        if (msg.type === "open") run(open(msg as OpenMsg));
+      } catch {}
+    }
   });
-  server = srv;
-  // Reuse the previous port so pi sessions survive a window reload; fall back to ephemeral.
-  srv.on("error", (err: NodeJS.ErrnoException) =>
-    port && err.code === "EADDRINUSE" ? listen(context, 0) : console.error("piContext", err),
-  );
-  srv.listen(port || 0, "127.0.0.1", () => {
-    const p = (srv.address() as net.AddressInfo).port;
-    context.workspaceState.update(PORT_KEY, p);
+  sock.on("close", () => sockets.delete(sock));
+  sock.on("error", () => sockets.delete(sock));
+  send(sock, { type: "context", data: collect() });
+};
+
+export const activate = (context: vscode.ExtensionContext) =>
+  Effect.gen(function* () {
+    const run = yield* FiberSet.makeRuntime<never>();
+    // Each call interrupts the pending one: a 200ms debounce.
+    const runDebounced = yield* FiberHandle.makeRuntime<never>();
+    const schedule = (): void => void runDebounced(Effect.sleep("200 millis").pipe(Effect.andThen(push)));
+    yield* Effect.forEach([
+      () => vscode.commands.registerCommand("piContext.sendToPi", sendToPi),
+      () => vscode.window.onDidChangeActiveTextEditor(schedule),
+      () => vscode.window.onDidChangeTextEditorSelection(schedule),
+      () => vscode.window.tabGroups.onDidChangeTabs(schedule),
+      () => vscode.workspace.onDidSaveTextDocument(schedule),
+    ], disposable);
+    collect();
+    yield* Effect.addFinalizer(() => Effect.sync(() => sockets.forEach((s) => s.destroy())));
+
+    // Reuse the previous port so pi sessions survive a window reload; fall back to ephemeral.
+    const saved = context.workspaceState.get<number>(PORT_KEY);
+    const p = yield* serve(saved || 0, onConnection(run)).pipe(
+      Effect.catchIf((err) => !!saved && err.code === "EADDRINUSE", () => serve(0, onConnection(run))),
+    );
+    yield* thenable(() => context.workspaceState.update(PORT_KEY, p)).pipe(Effect.ignore);
     context.environmentVariableCollection.replace("PI_VSCODE_PORT", String(p));
     // Terminals spawned by other extensions in this extension host (e.g. Secondary
     // Terminal, which spreads process.env) inherit this.
     process.env.PI_VSCODE_PORT = String(p);
-    writePortFile(p);
-  });
-}
-
-export function activate(context: vscode.ExtensionContext): void {
-  listen(context, context.workspaceState.get<number>(PORT_KEY));
-  context.subscriptions.push(
-    vscode.commands.registerCommand("piContext.sendToPi", sendToPi),
-    vscode.window.onDidChangeActiveTextEditor(schedule),
-    vscode.window.onDidChangeTextEditorSelection(schedule),
-    vscode.window.tabGroups.onDidChangeTabs(schedule),
-    vscode.workspace.onDidSaveTextDocument(schedule),
-  );
-  collect();
-}
-
-export function deactivate(): void {
-  sockets.forEach((s) => s.destroy());
-  server?.close();
-  if (portFile) {
-    try {
-      fs.rmSync(portFile, { force: true });
-    } catch {}
-  }
-}
+    yield* portFile(p).pipe(Effect.catchCause((cause) => Effect.logError("piContext portfile", cause)));
+  }).pipe(Effect.catchCause((cause) => Effect.logError("piContext", cause)));

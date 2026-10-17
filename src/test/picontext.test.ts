@@ -29,7 +29,9 @@ const net = require("net") as { createServer: unknown };
 net.createServer = (cb: typeof onConn) => ((onConn = cb), { on() {}, listen() {}, close() {} });
 // Loaded after the mocks are installed (a static import would be hoisted above them).
 const ext = require("../picontext") as typeof import("../picontext");
-ext.activate({ workspaceState: { get() {}, update() {} }, environmentVariableCollection: { replace() {} }, subscriptions: [] } as never);
+const { Effect, Scope } = require("effect") as typeof import("effect");
+Effect.runFork(ext.activate({ workspaceState: { get() {}, update() {} }, environmentVariableCollection: { replace() {} } } as never)
+  .pipe(Scope.provide(Scope.makeUnsafe())));
 const connect = () => onConn({ ...fakeSock, setEncoding() {}, on() {} });
 
 connect();
