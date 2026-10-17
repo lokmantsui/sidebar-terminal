@@ -4,9 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
 import type { Readable, Writable } from 'stream';
-import { Deferred, Effect, Exit, FiberSet, Schedule, Scope } from 'effect';
 import * as piContext from './picontext';
-import { disposable, thenable } from './scoped';
 
 // python3 ptyhost.py: stdin/stdout pipes, stderr inherited, fd 3 = resize channel.
 type PtyProc = cp.ChildProcessByStdio<Writable, Readable, null>;
@@ -26,10 +24,10 @@ interface WebviewMsg {
   rows?: number;
 }
 
-const waitUntil = (cond: () => boolean, timeout: `${number} seconds`) => Effect.sync(cond).pipe(
-  Effect.repeat({ until: (ok) => ok, schedule: Schedule.spaced('100 millis') }),
-  Effect.timeoutOption(timeout),
-);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const waitUntil = async (cond: () => boolean, timeoutMs: number) => {
+  for (let t = 0; t < timeoutMs && !cond(); t += 100) await sleep(100);
+};
 const workspaceDirs = () => (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
 
 // rootPid and everything running under it, deepest first.
@@ -77,27 +75,25 @@ const claudeIdeEnv = (): Record<string, string> => {
 };
 
 // The shell inherits its IDE integration env at spawn time, so give both bridges a moment to come up.
-const waitForIdeEnv = Effect.gen(function* () {
+const waitForIdeEnv = async (): Promise<void> => {
   // The pi bridge's server listens asynchronously and then sets PI_VSCODE_PORT in process.env.
-  yield* waitUntil(() => !!process.env.PI_VSCODE_PORT, '2 seconds');
+  await waitUntil(() => !!process.env.PI_VSCODE_PORT, 2000);
   // On window load, Claude Code's lock file appears a few seconds after we start.
   const claudeExt = vscode.extensions.getExtension('anthropic.claude-code');
   if (claudeExt) {
-    yield* thenable(() => claudeExt.activate()).pipe(Effect.ignore);
-    yield* waitUntil(() => !!claudeIdeEnv().CLAUDE_CODE_SSE_PORT, '10 seconds');
+    await Promise.resolve(claudeExt.activate()).catch(() => {});
+    await waitUntil(() => !!claudeIdeEnv().CLAUDE_CODE_SSE_PORT, 10000);
   }
-});
-
-const exists = (f: string) => Effect.tryPromise(() => fs.promises.stat(f)).pipe(Effect.as(true), Effect.orElseSucceed(() => false));
+};
 
 // First existing match of `p` (absolute, ~/..., or relative to one of `dirs`), or null.
-const resolvePath = (p: string, dirs: string[]) => Effect.gen(function* () {
+const resolvePath = async (p: string, dirs: string[]): Promise<string | null> => {
   if (p.startsWith('~/')) p = path.join(os.homedir(), p.slice(2));
   for (const f of path.isAbsolute(p) ? [p] : dirs.map((d) => path.resolve(d, p))) {
-    if (yield* exists(f)) return f;
+    try { await fs.promises.stat(f); return f; } catch {}
   }
   return null;
-});
+};
 
 // Splits a scheme-less link like "(src/a.ts#L10-L20)" or "src/a.ts:10:5" into path, line and column.
 const parseRelativeLink = (link: string): { path: string; line?: number; col?: number } => {
@@ -109,84 +105,85 @@ const parseRelativeLink = (link: string): { path: string; line?: number; col?: n
   return { path: p, line: line ? +line : undefined, col: col ? +col : undefined };
 };
 
-const openTarget = (op: OpenPath) => Effect.gen(function* () {
-  if ('url' in op) return yield* thenable(() => vscode.env.openExternal(vscode.Uri.parse(op.url)));
-  if ('search' in op) return yield* thenable(() => vscode.commands.executeCommand('workbench.action.quickOpen', op.search));
+const openTarget = async (op: OpenPath): Promise<unknown> => {
+  if ('url' in op) return vscode.env.openExternal(vscode.Uri.parse(op.url));
+  if ('search' in op) return vscode.commands.executeCommand('workbench.action.quickOpen', op.search);
   const u = vscode.Uri.file(op.path);
-  if ((yield* Effect.tryPromise(() => fs.promises.stat(op.path))).isDirectory()) {
-    return yield* thenable(() => vscode.commands.executeCommand('revealInExplorer', u));
-  }
+  if ((await fs.promises.stat(op.path)).isDirectory()) return vscode.commands.executeCommand('revealInExplorer', u);
   const line = Math.max(0, (op.line || 1) - 1), col = Math.max(0, (op.col || 1) - 1);
-  return yield* thenable(() => vscode.window.showTextDocument(u, op.line ? { selection: new vscode.Range(line, col, line, col) } : {}));
-});
+  return vscode.window.showTextDocument(u, op.line ? { selection: new vscode.Range(line, col, line, col) } : {});
+};
 
 // A clicked OSC 8 / plain-text link.
-const openLink = (link: string, dirs: string[]) => Effect.gen(function* () {
+const openLink = async (link: string, dirs: string[]): Promise<unknown> => {
   // OSC 8 links without a scheme (e.g. Claude Code's markdown links) are relative paths.
   if (!/^[a-z][\w+.-]*:/i.test(link)) {
     const { path: p, line, col } = parseRelativeLink(link);
-    const resolved = yield* resolvePath(p, dirs);
-    return yield* openTarget(resolved ? { path: resolved, line, col } : { search: p });
+    const resolved = await resolvePath(p, dirs);
+    return openTarget(resolved ? { path: resolved, line, col } : { search: p });
   }
   // file:// links (e.g. paths printed by pi) open in the editor; everything else externally.
-  const u = yield* Effect.try(() => vscode.Uri.parse(link, true));
-  return yield* thenable(() => u.scheme === 'file' ? vscode.commands.executeCommand('vscode.open', u) : vscode.env.openExternal(u));
-});
+  let u: vscode.Uri;
+  try { u = vscode.Uri.parse(link, true); } catch { return; }
+  return u.scheme === 'file' ? vscode.commands.executeCommand('vscode.open', u) : vscode.env.openExternal(u);
+};
 
-interface Shell {
-  readonly pid: number | undefined;
-  input(data: string): void;
-  resize(cols: number, rows: number): void;
-}
+// The shell running under ptyhost.py. After it exits, the next keypress starts a fresh one.
+class Shell {
+  private proc!: PtyProc;
+  private size?: string; // last "cols rows\n" from the webview; unknown until it first reports
+  private exited = false;
+  private disposed = false;
 
-// The shell running under ptyhost.py, killed when the Scope closes. After it exits, the next keypress starts a fresh one.
-const makeShell = (script: string, cwd: string, startupCmd: string, output: (data: string | Buffer) => void) => Effect.gen(function* () {
-  let proc: PtyProc | undefined; // undefined while exited
-  let size: string | undefined; // last "cols rows\n" from the webview; unknown until it first reports
-  let keypress = Deferred.makeUnsafe<void>();
-  const sized = yield* Deferred.make<void>();
+  constructor(
+    private readonly script: string,
+    private readonly cwd: string,
+    private readonly startupCmd: string,
+    private readonly output: (data: string | Buffer) => void,
+  ) {
+    this.start();
+  }
 
-  const writeSize = (p: PtyProc) => (p.stdio[3] as Writable).write(size);
-  const spawn = Effect.acquireRelease(
-    Effect.sync(() => cp.spawn('python3', [script], {
-      cwd,
+  get pid(): number | undefined { return this.proc.pid; }
+
+  private start(): void {
+    this.exited = false;
+    const p = this.proc = cp.spawn('python3', [this.script], {
+      cwd: this.cwd,
       env: { ...process.env, ...claudeIdeEnv(), TERM: 'xterm-256color', TERM_PROGRAM: 'vscode' },
       stdio: ['pipe', 'pipe', 'inherit', 'pipe'],
-    }) as PtyProc),
-    (p) => Effect.sync(() => p.kill()),
-  );
-  const runOnce = Effect.scoped(Effect.gen(function* () {
-    const p = yield* spawn;
-    const exited = yield* Deferred.make<void>();
-    p.on('exit', () => Deferred.doneUnsafe(exited, Exit.void));
-    p.stdout.on('data', output);
-    proc = p;
-    // Resize before the startup command so it starts at the right size.
-    yield* Deferred.await(sized);
-    writeSize(p);
-    if (startupCmd) p.stdin.write(startupCmd + '\r');
-    yield* Deferred.await(exited);
-    proc = undefined;
-    output('\r\n\x1b[2m[process exited — press any key to restart]\x1b[0m\r\n');
-  }));
-  yield* Effect.forkScoped(Effect.forever(Effect.gen(function* () {
-    keypress = Deferred.makeUnsafe<void>();
-    yield* runOnce;
-    yield* Deferred.await(keypress);
-    output('\x1bc'); // reset screen
-  })));
+    }) as PtyProc;
+    p.stdout.on('data', this.output);
+    p.on('exit', () => {
+      if (this.disposed || p !== this.proc) return;
+      this.exited = true;
+      this.output('\r\n\x1b[2m[process exited — press any key to restart]\x1b[0m\r\n');
+    });
+    // Resize before the startup command so it starts at the right size; on first start, resize() does this.
+    if (this.size) { this.writeSize(); this.runStartupCmd(); }
+  }
 
-  return {
-    get pid() { return proc?.pid; },
-    input: (data) => proc ? proc.stdin.write(data) : Deferred.doneUnsafe(keypress, Exit.void),
-    resize: (cols, rows) => {
-      const first = !size;
-      size = `${cols} ${rows}\n`;
-      if (first) Deferred.doneUnsafe(sized, Exit.void);
-      else if (proc) writeSize(proc);
-    },
-  } satisfies Shell;
-});
+  input(data: string): void {
+    if (!this.exited) { this.proc.stdin.write(data); return; }
+    this.output('\x1bc'); // reset screen
+    this.start();
+  }
+
+  resize(cols: number, rows: number): void {
+    const first = !this.size;
+    this.size = `${cols} ${rows}\n`;
+    if (!this.exited) this.writeSize();
+    if (first) this.runStartupCmd();
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.proc.kill();
+  }
+
+  private writeSize(): void { (this.proc.stdio[3] as Writable).write(this.size); }
+  private runStartupCmd(): void { if (this.startupCmd) this.proc.stdin.write(this.startupCmd + '\r'); }
+}
 
 // The live sidebar terminal, if its view is open.
 let sidebar: { view: vscode.WebviewView; shell: Shell } | undefined;
@@ -224,63 +221,49 @@ const webviewHtml = (webview: vscode.Webview, extensionPath: string, xtermRoot: 
 </body></html>`;
 };
 
-const resolveWebviewView = (ctx: vscode.ExtensionContext, view: vscode.WebviewView) => Effect.gen(function* () {
-  yield* waitForIdeEnv;
+const resolveWebviewView = async (ctx: vscode.ExtensionContext, view: vscode.WebviewView): Promise<void> => {
+  await waitForIdeEnv();
 
   const xtermRoot = vscode.Uri.joinPath(ctx.extensionUri, 'node_modules', '@xterm');
   view.webview.options = { enableScripts: true, localResourceRoots: [xtermRoot] };
 
   const cwd = workspaceDirs()[0] || os.homedir();
   const startupCmd = vscode.workspace.getConfiguration('sidebarTerminal').get<string>('startupCommand', '').trim();
-  const shell = yield* makeShell(path.join(ctx.extensionPath, 'ptyhost.py'), cwd, startupCmd,
+  const shell = new Shell(path.join(ctx.extensionPath, 'ptyhost.py'), cwd, startupCmd,
     (data) => view.webview.postMessage(Buffer.from(data).toString('base64')));
-  yield* Effect.acquireRelease(Effect.sync(() => { sidebar = { view, shell }; }), () => Effect.sync(() => { sidebar = undefined; }));
+  sidebar = { view, shell };
+  view.onDidDispose(() => { shell.dispose(); sidebar = undefined; });
 
   // Opening the sidebar should put the cursor in the terminal (the webview then forwards focus to xterm).
-  yield* disposable(() => view.onDidChangeVisibility(() => { if (view.visible) view.show(false); }));
+  view.onDidChangeVisibility(() => { if (view.visible) view.show(false); });
 
   // Where relative paths in terminal output may live: the shell's (and its children's) cwds, then the workspace.
   const searchDirs = () => [...processCwds(shell.pid), cwd, ...workspaceDirs()];
 
-  const handle = (m: WebviewMsg): Effect.Effect<unknown, unknown> => {
-    if (m.copy !== undefined) return thenable(() => vscode.env.clipboard.writeText(m.copy!));
-    if (m.paste) return thenable(() => vscode.env.clipboard.readText()).pipe(
-      Effect.andThen((paste) => thenable(() => view.webview.postMessage({ paste }))));
-    if (m.input !== undefined) return Effect.sync(() => shell.input(m.input!));
+  view.webview.onDidReceiveMessage(async (m: WebviewMsg) => {
+    if (m.copy !== undefined) return vscode.env.clipboard.writeText(m.copy);
+    if (m.paste) return view.webview.postMessage({ paste: await vscode.env.clipboard.readText() });
+    if (m.input !== undefined) return shell.input(m.input);
     if (m.openPath) return openTarget(m.openPath);
     if (m.open) return openLink(m.open, searchDirs());
     if (m.resolve) {
       const dirs = searchDirs();
-      return Effect.forEach(m.resolve, (p) => resolvePath(p, dirs), { concurrency: 'unbounded' }).pipe(
-        Effect.andThen((results) => thenable(() => view.webview.postMessage({ resolved: m.id, results }))));
+      const results = await Promise.all(m.resolve.map((p) => resolvePath(p, dirs)));
+      return view.webview.postMessage({ resolved: m.id, results });
     }
-    return Effect.sync(() => { if (m.cols && m.rows) shell.resize(m.cols, m.rows); });
-  };
-  const run = yield* FiberSet.makeRuntime<never>();
-  yield* disposable(() => view.webview.onDidReceiveMessage((m: WebviewMsg) =>
-    run(handle(m).pipe(Effect.catchCause((cause) => Effect.logError('sidebarTerminal', cause))))));
+    if (m.cols && m.rows) shell.resize(m.cols, m.rows);
+  });
 
   view.webview.html = webviewHtml(view.webview, ctx.extensionPath, xtermRoot);
-});
+};
 
-// Everything the extension holds open; closed on deactivate.
-let root: Scope.Closeable | undefined;
-
-export const deactivate = (): Promise<void> | undefined => root && Effect.runPromise(Scope.close(root, Exit.void));
+export const deactivate = (): void => piContext.deactivate();
 
 export const activate = (ctx: vscode.ExtensionContext): void => {
-  const scope = root = Scope.makeUnsafe();
-  Effect.runFork(piContext.activate(ctx).pipe(Scope.provide(scope)));
+  piContext.activate(ctx);
   vscode.window.terminals.forEach(redirectClaudeTerminalFocus);
-  Effect.runSync(Effect.all([
-    disposable(() => vscode.window.onDidOpenTerminal(redirectClaudeTerminalFocus)),
-    disposable(() => vscode.window.registerWebviewViewProvider('sidebarTerminal.view', {
-      // Each view gets its own scope, closed when the view is disposed.
-      resolveWebviewView: (view) => {
-        const viewScope = Scope.forkUnsafe(scope);
-        view.onDidDispose(() => Effect.runFork(Scope.close(viewScope, Exit.void)));
-        return Effect.runPromise(resolveWebviewView(ctx, view).pipe(Scope.provide(viewScope)));
-      },
-    }, { webviewOptions: { retainContextWhenHidden: true } })),
-  ]).pipe(Scope.provide(scope)));
+  ctx.subscriptions.push(vscode.window.onDidOpenTerminal(redirectClaudeTerminalFocus));
+  ctx.subscriptions.push(vscode.window.registerWebviewViewProvider('sidebarTerminal.view', {
+    resolveWebviewView: (view) => resolveWebviewView(ctx, view),
+  }, { webviewOptions: { retainContextWhenHidden: true } }));
 };
