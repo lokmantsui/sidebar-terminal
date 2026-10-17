@@ -41,4 +41,6 @@ press(true); input('\x1b[M0*4'); input('\x1b[48;10;20M'); release(mouseUp);
 assert.strictEqual(sent.length, 4); // X10 and urxvt mouse encodings.
 press(true, false, 2); input('\x1b[<18;10;20M'); release('\x1b[<18;10;20m');
 assert.strictEqual(sent.length, 6); // Right-click isn't reserved for links.
+press(true); input('\x1b[I'); assert.strictEqual(sent.length, 6); release(mouseUp);
+assert.strictEqual(sent[6], '\x1b[I'); // Focus report held until the link click ends, then sent.
 console.log('OK: Ctrl/Cmd-link clicks stay in webview; keyboard and ordinary mouse input pass through');

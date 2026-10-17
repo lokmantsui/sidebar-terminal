@@ -37,12 +37,24 @@ term.loadAddon(new WebLinksAddon.WebLinksAddon(openLink)); // plain-text URLs
 term.open(document.getElementById('t')!);
 
 // Reserve Ctrl/Cmd-left-click for webview links, not the application's own URL opener.
+// Focus reports are held until the click ends: Claude Code answers focus-in with an OSC 104 color reset,
+// which repaints every row, and xterm drops a link that is repainted between mousedown and mouseup.
 let linkClick = false;
+let heldFocusReports: string[] = [];
 term.element!.addEventListener('mousedown', (e) => { linkClick = e.button === 0 && (e.ctrlKey || e.metaKey); }, true);
-document.addEventListener('mouseup', () => { queueMicrotask(() => { linkClick = false; }); }, true);
+document.addEventListener('mouseup', () => {
+  queueMicrotask(() => {
+    linkClick = false;
+    heldFocusReports.forEach((input) => vscode.postMessage({ input }));
+    heldFocusReports = [];
+  });
+}, true);
 term.onData((input) => {
-  // xterm's mouse packets: SGR, urxvt and X10. Keyboard input must still pass through.
-  if (linkClick && /^\x1b\[(?:<\d+;\d+;\d+[Mm]|\d+;\d+;\d+M|M[\s\S]{3})$/.test(input)) return;
+  if (linkClick) {
+    // xterm's mouse packets: SGR, urxvt and X10. Keyboard input must still pass through.
+    if (/^\x1b\[(?:<\d+;\d+;\d+[Mm]|\d+;\d+;\d+M|M[\s\S]{3})$/.test(input)) return;
+    if (input === '\x1b[I' || input === '\x1b[O') { heldFocusReports.push(input); return; }
+  }
   vscode.postMessage({ input });
 });
 
