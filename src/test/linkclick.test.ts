@@ -4,14 +4,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vm from 'vm';
 
-// Exercise the actual inlined webview code, including its template-literal escaping.
-const source = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
-const fragment = source.slice(source.indexOf('  // Reserve Ctrl/Cmd-left-click'), source.indexOf('  // OSC 52 clipboard writes'));
+// Exercise the actual compiled webview code.
+const source = fs.readFileSync(path.join(__dirname, '..', 'webview', 'terminal.js'), 'utf8');
+const fragment = source.slice(source.indexOf('// Reserve Ctrl/Cmd-left-click'), source.indexOf('// OSC 52 clipboard writes'));
 assert.ok(fragment.includes('term.onData'));
 const down: ((e: { button: number; ctrlKey: boolean; metaKey: boolean }) => void)[] = [];
 const up: (() => void)[] = [], microtasks: (() => void)[] = [], sent: string[] = [];
 let input!: (text: string) => void;
-vm.runInNewContext(vm.runInNewContext('`' + fragment + '`'), {
+vm.runInNewContext(fragment, {
   term: {
     element: { addEventListener: (name: string, fn: typeof down[number], capture: boolean) => {
       assert.strictEqual(name, 'mousedown'); assert.strictEqual(capture, true); down.push(fn);
