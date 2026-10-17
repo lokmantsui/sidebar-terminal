@@ -30,18 +30,27 @@ const waitUntil = async (cond: () => boolean, timeoutMs: number) => {
 };
 const workspaceDirs = () => (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
 
-// cwds of the shell and everything running under it (deepest first), e.g. pi's cwd — used to resolve relative paths.
-const processCwds = (rootPid: number | undefined): string[] => {
+// rootPid and everything running under it, deepest first.
+const processTree = (rootPid: number | undefined): string[] => {
   const out: string[] = [];
-  const walk = (pid: number | string): void => {
+  const walk = (pid: string): void => {
     let kids: string[] = [];
     try { kids = fs.readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim().split(/\s+/).filter(Boolean); } catch {}
     kids.forEach(walk);
-    try { out.push(fs.readlinkSync(`/proc/${pid}/cwd`)); } catch {}
+    out.push(pid);
   };
-  if (rootPid) walk(rootPid);
-  return [...new Set(out)];
+  if (rootPid) walk(String(rootPid));
+  return out;
 };
+
+// cwds of the shell and everything running under it (deepest first), e.g. pi's cwd — used to resolve relative paths.
+const processCwds = (rootPid: number | undefined): string[] => [...new Set(processTree(rootPid).flatMap((pid) => {
+  try { return [fs.readlinkSync(`/proc/${pid}/cwd`)]; } catch { return []; }
+}))];
+
+const runsClaude = (rootPid: number | undefined): boolean => processTree(rootPid).some((pid) => {
+  try { return fs.readFileSync(`/proc/${pid}/comm`, 'utf8').trim() === 'claude'; } catch { return false; }
+});
 
 // The Claude Code extension only injects these into integrated terminals (environmentVariableCollection),
 // so find its lock file for this window's workspace and pass them on ourselves.
@@ -176,6 +185,25 @@ class Shell {
   private runStartupCmd(): void { if (this.startupCmd) this.proc.stdin.write(this.startupCmd + '\r'); }
 }
 
+// The live sidebar terminal, if its view is open.
+let sidebar: { view: vscode.WebviewView; shell: Shell } | undefined;
+
+// Claude Code's extension calls activeTerminal.show() when a prompt is submitted (closeAllDiffTabs) or a diff
+// opens, to refocus the terminal it assumes the CLI runs in — popping open a hidden panel. Terminal objects are
+// shared by every extension in this extension host, so wrap show(): when Claude runs in the sidebar and not in
+// that terminal, focus the sidebar instead. Claude launching its own new terminal (not yet active) is untouched.
+// ponytail: stack-sniffs another extension's calls; breaks quietly (back to the popup) if VS Code or Claude Code change.
+const redirectClaudeTerminalFocus = (t: vscode.Terminal): void => {
+  const show = t.show;
+  t.show = (preserveFocus?: boolean) => {
+    if (!new Error().stack?.includes('anthropic.claude-code') || t !== vscode.window.activeTerminal) return show.call(t, preserveFocus);
+    void t.processId.then((pid) => {
+      if (!sidebar || !runsClaude(sidebar.shell.pid) || runsClaude(pid)) show.call(t, preserveFocus);
+      else if (!preserveFocus) sidebar.view.show(false);
+    });
+  };
+};
+
 const webviewHtml = (webview: vscode.Webview, extensionPath: string, xtermRoot: vscode.Uri): string => {
   const csp = webview.cspSource;
   const xterm = (p: string) => webview.asWebviewUri(vscode.Uri.joinPath(xtermRoot, p));
@@ -203,7 +231,8 @@ const resolveWebviewView = async (ctx: vscode.ExtensionContext, view: vscode.Web
   const startupCmd = vscode.workspace.getConfiguration('sidebarTerminal').get<string>('startupCommand', '').trim();
   const shell = new Shell(path.join(ctx.extensionPath, 'ptyhost.py'), cwd, startupCmd,
     (data) => view.webview.postMessage(Buffer.from(data).toString('base64')));
-  view.onDidDispose(() => shell.dispose());
+  sidebar = { view, shell };
+  view.onDidDispose(() => { shell.dispose(); sidebar = undefined; });
 
   // Opening the sidebar should put the cursor in the terminal (the webview then forwards focus to xterm).
   view.onDidChangeVisibility(() => { if (view.visible) view.show(false); });
@@ -232,6 +261,8 @@ export const deactivate = (): void => piContext.deactivate();
 
 export const activate = (ctx: vscode.ExtensionContext): void => {
   piContext.activate(ctx);
+  vscode.window.terminals.forEach(redirectClaudeTerminalFocus);
+  ctx.subscriptions.push(vscode.window.onDidOpenTerminal(redirectClaudeTerminalFocus));
   ctx.subscriptions.push(vscode.window.registerWebviewViewProvider('sidebarTerminal.view', {
     resolveWebviewView: (view) => resolveWebviewView(ctx, view),
   }, { webviewOptions: { retainContextWhenHidden: true } }));
