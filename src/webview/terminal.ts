@@ -68,7 +68,15 @@ term.parser.registerOscHandler(52, (data) => {
 });
 
 // Handle Cmd+C/V and Ctrl+Shift+C/V through VS Code's clipboard, including remote sessions.
+// Cmd+Left/Right jump to the start/end of the whole prompt (xterm ignores Cmd combos). pi has no key for
+// that, so: PageUp/PageDown (clamped to the first/last row, no history side effects), then Ctrl+A/E.
+// ponytail: 20 pages ≈ 100+ rows; prompts taller than that stop short.
+const cmdArrows: Record<string, string> = { ArrowLeft: '\x1b[5~'.repeat(20) + '\x01', ArrowRight: '\x1b[6~'.repeat(20) + '\x05' };
 term.attachCustomKeyEventHandler((e) => {
+  if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && cmdArrows[e.key]) {
+    if (e.type === 'keydown') { e.preventDefault(); vscode.postMessage({ input: cmdArrows[e.key] }); }
+    return false;
+  }
   const isCopyPaste = (e.metaKey || (e.ctrlKey && e.shiftKey)) && !e.altKey && (e.code === 'KeyC' || e.code === 'KeyV');
   if (!isCopyPaste) return true;
   if (e.type === 'keydown') {
