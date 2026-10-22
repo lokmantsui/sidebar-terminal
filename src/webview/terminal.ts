@@ -67,11 +67,9 @@ term.parser.registerOscHandler(52, (data) => {
   return true;
 });
 
-// Handle Cmd+C/V and Ctrl+Shift+C/V through VS Code's clipboard, including remote sessions.
-// Cmd+Left/Right jump to the start/end of the whole prompt (xterm ignores Cmd combos). pi has no key for
-// that, so: PageUp/PageDown (clamped to the first/last row, no history side effects), then Ctrl+A/E.
-// ponytail: 20 pages ≈ 100+ rows; prompts taller than that stop short.
-const cmdArrows: Record<string, string> = { ArrowLeft: '\x1b[5~'.repeat(20) + '\x01', ArrowRight: '\x1b[6~'.repeat(20) + '\x05' };
+// Cmd+Left/Right as Super+arrow (CSI 1;9 D/C; xterm ignores Cmd combos). Claude Code reads these as
+// start/end of the wrapped line, stepping to the previous/next line on repeat; Ctrl+A/E only do logical lines.
+const cmdArrows: Record<string, string> = { ArrowLeft: '\x1b[1;9D', ArrowRight: '\x1b[1;9C' };
 term.attachCustomKeyEventHandler((e) => {
   if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && cmdArrows[e.key]) {
     if (e.type === 'keydown') { e.preventDefault(); vscode.postMessage({ input: cmdArrows[e.key] }); }
