@@ -52,6 +52,8 @@ const runsClaude = (rootPid: number | undefined): boolean => processTree(rootPid
   try { return fs.readFileSync(`/proc/${pid}/comm`, 'utf8').trim() === 'claude'; } catch { return false; }
 });
 
+const hostStart = Date.now() - process.uptime() * 1000;
+
 // The Claude Code extension only injects these into integrated terminals (environmentVariableCollection),
 // so find its lock file for this window's workspace and pass them on ourselves.
 const claudeIdeEnv = (): Record<string, string> => {
@@ -67,6 +69,8 @@ const claudeIdeEnv = (): Record<string, string> => {
         if (!lock.workspaceFolders?.some((w) => folders.includes(w))) continue;
         if (lock.pid) process.kill(lock.pid, 0); // throws if stale
         const mtime = fs.statSync(file).mtimeMs;
+        // lock.pid is the remote server, which survives window reloads; a lock older than this host is stale.
+        if (mtime < hostStart) continue;
         if (!best || mtime > best.mtime) best = { port: path.basename(f, '.lock'), mtime };
       } catch {}
     }
