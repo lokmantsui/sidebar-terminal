@@ -9,7 +9,7 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'webview', 'terminal.j
 const fragment = source.slice(source.indexOf('// Reserve Ctrl/Cmd-left-click'), source.indexOf('// OSC 52 clipboard writes'));
 assert.ok(fragment.includes('term.onData'));
 const down: ((e: { button: number; ctrlKey: boolean; metaKey: boolean }) => void)[] = [];
-const up: (() => void)[] = [], microtasks: (() => void)[] = [], sent: string[] = [];
+const up: (() => void)[] = [], tasks: (() => void)[] = [], sent: string[] = [];
 let input!: (text: string) => void;
 vm.runInNewContext(fragment, {
   term: {
@@ -21,13 +21,13 @@ vm.runInNewContext(fragment, {
   document: { addEventListener: (name: string, fn: () => void, capture: boolean) => {
     assert.strictEqual(name, 'mouseup'); assert.strictEqual(capture, true); up.push(fn);
   } },
-  queueMicrotask: (fn: () => void) => microtasks.push(fn),
+  setTimeout: (fn: () => void) => tasks.push(fn),
   vscode: { postMessage: (m: { input: string }) => sent.push(m.input) },
 });
 const press = (ctrlKey = false, metaKey = false, button = 0) => down.forEach(fn => fn({ ctrlKey, metaKey, button }));
 const release = (packet: string) => {
   up.forEach(fn => fn()); input(packet); // Capture listener runs before xterm's bubbling mouse listener.
-  microtasks.splice(0).forEach(fn => fn());
+  tasks.splice(0).forEach(fn => fn());
 };
 const mouseDown = '\x1b[<16;10;20M', mouseUp = '\x1b[<16;10;20m';
 press(true); input(mouseDown); input('typed key'); release(mouseUp);

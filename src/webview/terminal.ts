@@ -42,8 +42,10 @@ term.open(document.getElementById('t')!);
 let linkClick = false;
 let heldFocusReports: string[] = [];
 term.element!.addEventListener('mousedown', (e) => { linkClick = e.button === 0 && (e.ctrlKey || e.metaKey); }, true);
+// Released in a task, not a microtask: on a real click microtasks run between listeners, so the guard would
+// drop before xterm's bubbling mouseup listener sends the release packet (Claude Code then toggles its view).
 document.addEventListener('mouseup', () => {
-  queueMicrotask(() => {
+  setTimeout(() => {
     linkClick = false;
     heldFocusReports.forEach((input) => vscode.postMessage({ input }));
     heldFocusReports = [];

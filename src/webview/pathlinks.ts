@@ -97,6 +97,8 @@ window.installPathLinks = (term, resolve, open) => {
     for (const m of text.matchAll(TOKEN)) {
       let s = m[0], start = m.index!;
       if (s.includes('://')) continue; // URLs are handled by the web-links addon / OSC 8
+      const assign = s.match(/^[\w-]+=(?=[~.\/])/)?.[0] ?? ''; // D=/path, --out=./path
+      s = s.slice(assign.length); start += assign.length;
       const lead = s.match(/^[*_~.:]*(?=[~.\/\w])/)?.[0] ?? ''; // markdown/punctuation before the path
       if (lead && !/^\.{1,2}\/|^~\//.test(s)) { s = s.slice(lead.length); start += lead.length; }
       s = s.replace(/:(?!\d).*$/, '').replace(/[.,:;!?*_]+$/, ''); // "file.js:12:code" -> "file.js:12"
