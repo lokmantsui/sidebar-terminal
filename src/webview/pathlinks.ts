@@ -88,6 +88,9 @@ window.installPathLinks = (term, resolve, open) => {
 
   const touchesRow = (j: Joined, s: Span, y: number) => j.pos[s.start].y <= y && j.pos[s.end - 1].y >= y;
   const seamsInside = (j: Joined, s: Span) => j.seams.filter((seam) => s.start < seam && seam < s.end);
+  // A seam where the row before it reaches the right edge: almost certainly a TUI wrap, not a real newline.
+  // ponytail: right-edge heuristic, misses TUIs that wrap well short of the terminal width.
+  const wrapsAtEdge = (j: Joined, s: Span) => seamsInside(j, s).some((seam) => j.pos[seam - 1].x >= term.cols - 3);
 
   // ---- Finding candidates ----
 
@@ -114,11 +117,10 @@ window.installPathLinks = (term, resolve, open) => {
 
   // URLs a TUI hard-wrapped (the web-links addon only follows soft wraps). Only joined where the row before
   // the break reaches the right edge, so a URL ending a line doesn't swallow the next line's text.
-  // ponytail: right-edge heuristic, misses TUIs that wrap well short of the terminal width.
   const wrappedUrls = (j: Joined, y: number): Span[] =>
     [...j.text.matchAll(HTTP_URL)]
       .map((m) => ({ start: m.index!, end: m.index! + m[0].replace(/[.,;:!?'")\]]+$/, '').length }))
-      .filter((s) => touchesRow(j, s, y) && seamsInside(j, s).some((seam) => j.pos[seam - 1].x >= term.cols - 3));
+      .filter((s) => touchesRow(j, s, y) && wrapsAtEdge(j, s));
 
   // ---- Resolving (cached briefly, since xterm asks again on every hover) ----
 
@@ -142,7 +144,7 @@ window.installPathLinks = (term, resolve, open) => {
 
       // Paths within soft-wrapped text are certain enough to link even if they don't resolve (-> Quick Open).
       const safe = pathCandidates(soft.text).filter((c) => touchesRow(soft, c, y));
-      // Paths that cross a hard newline are guesses: only linked if they resolve to a file.
+      // Paths that cross a hard newline are guesses: linked if they resolve to a file, or (-> Quick Open) if wrapped at the edge.
       const wrapped = hard.seams.length > 0;
       const guesses = wrapped ? pathCandidates(hard.text).filter((c) => touchesRow(hard, c, y) && seamsInside(hard, c).length) : [];
       const urls = wrapped ? wrappedUrls(hard, y) : [];
@@ -167,6 +169,7 @@ window.installPathLinks = (term, resolve, open) => {
         guesses.forEach((c, i) => {
           const path = guessResolved[i];
           if (path) add(hard, c, { path, line: c.line, col: c.col }, true);
+          else if (wrapsAtEdge(hard, c)) add(hard, c, { search: hard.text.slice(c.start, c.end) }, true);
         });
         safe.forEach((c, i) => {
           if (overlapsTaken(soft.pos[c.start], soft.pos[c.end - 1])) return;
